@@ -1,0 +1,66 @@
+---
+title: "Playing with sample size"
+author: "Christine Lucille Kuryla"
+date: "2023-12-22"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+```
+
+One would imagine that the larger the sample size, the closer the estimated graph is to the "true" graph. Here we are going to test to see if a small sample is sufficient in our BRCA data. 
+
+```{r eda}
+
+# We have the following distribution of samples
+metadata %>% 
+  group_by(Category) %>% 
+  count()
+
+# Our goal is to see if we can just use a subset of 80ish (the smallest sample) and get reliable graph reults. 
+# Why? Because in the downstream analysis, we want to compare the graphs from different subtypes to each other, so we want the density to be comparable for a fair comparison.
+
+# Since we have 547 samples that are the LumA subtype, but only 81 that are Her2, we want to see if it would be sufficient to proceed with the analysis using a subsample.
+
+# 547/81 = 6.75
+# We will learn 6 graphs with 81 samples (arbitrarily chosen, disjoint subsets), and then compare them to each other, as well as a graph learned from all 547 samples.
+# We are assuming that all of these samples are drawn from the same distribution (strong assumption!) but it's the best we can do right now.
+
+# Create vectors of the samples
+
+all_cases <- metadata %>% 
+  filter(Category == "LumA") %>% 
+  pull(cases)
+
+subsample_size <- 81
+
+subsample_1 <- all_cases[1:subsample_size]
+subsample_2 <- all_cases[(subsample_size+1):(2*subsample_size)]
+subsample_3 <- all_cases[(2*subsample_size+1):(3*subsample_size)]
+subsample_4 <- all_cases[(3*subsample_size+1):(4*subsample_size)]
+subsample_5 <- all_cases[(4*subsample_size+1):(5*subsample_size)]
+subsample_6 <- all_cases[(5*subsample_size+1):(6*subsample_size)] # comment out if necessary or add more if necessary
+
+# create data matrices 
+
+# set of genes to include
+gene_universe <- deg_data_1.25
+
+# data matrices for each subsample and for all together
+
+data_all_samples <- as.matrix(counts_z_transposed[all_cases,gene_universe])
+
+data_subsample_1 <- as.matrix(counts_z_transposed[subsample_1,gene_universe])
+data_subsample_2 <- as.matrix(counts_z_transposed[subsample_2,gene_universe])
+data_subsample_3 <- as.matrix(counts_z_transposed[subsample_3,gene_universe])
+data_subsample_4 <- as.matrix(counts_z_transposed[subsample_4,gene_universe])
+data_subsample_5 <- as.matrix(counts_z_transposed[subsample_5,gene_universe])
+data_subsample_6 <- as.matrix(counts_z_transposed[subsample_6,gene_universe])
+
+ug_glasso_all <- huge(x = data_all_samples, method = "glasso", nlambda = 10)
+ug_glasso_subsample_1 <- huge(x = data_subsample_1, method = "glasso", nlambda = 10)
+
+```
+
