@@ -1460,10 +1460,8 @@ keep_this_ensg <- res %>%
   arrange(desc(baseMean)) %>% 
   head(n=6)
 
-keep_this_ensg <- c("ENSG00000261737.1", "ENSG00000248671.8", "ENSG00000261737.1")
 
-
-# Ok 
+# Ok they are not important, I will just remove them.
 
 res_1to1 <- res %>%
   group_by(gene_symbol) %>%
@@ -1522,6 +1520,58 @@ sizeFactors(dds)
 
 
 saveRDS(dds, "./brca_data/other/dds/dds_filtered_1221.RDS")
+
+
+```
+
+```{r}
+
+# Heirarchical clustering
+
+norm_counts <- counts(dds, normalized = TRUE) 
+counts_transposed <- t(norm_counts)
+counts_z_transposed <- apply(counts_transposed, 2, scale)
+
+# Perform hierarchical clustering
+#hc <- hclust(dist(data))
+hc <- hclust(dist(counts_z_transposed))
+
+cts_no_outliers <- as.data.frame(counts_z_transposed) %>% 
+  rownames_to_column(var = "case") %>% 
+  filter(!(case %in% outliers)) %>% 
+  column_to_rownames(var = "case")
+
+hc_orig <- hclust(dist(data), method = "ward.D2")
+hc <- hclust(dist(cts_no_outliers), method = "ward.D2")
+
+# Cut tree to form groups
+clusters <- cutree(hc, k = 5)
+
+cancer_subtypes <- as.data.frame(metadata %>% select(Category)) %>% 
+  rownames_to_column(var = "case") %>% 
+  filter(!(case %in% outliers)) %>% 
+  column_to_rownames(var = "case") 
+
+# Compare with actual groups
+table(Cluster = clusters, ActualGroup = as.matrix(cancer_subtypes))
+table(Cluster = clusters, ActualGroup = as.matrix(metadata$Category))
+
+outliers <- as.data.frame(clusters) %>% 
+  filter(clusters != 1) %>% 
+#  filter(clusters != 2) %>% 
+  rownames()
+
+
+
+metadata_new <- metadata %>% 
+  filter(!(case %in% outliers))
+countdata_new <- cts_no_outliers
+
+# make a new dds later if want to remove these. For now, this has not been done.
+
+
+
+
 
 
 ```

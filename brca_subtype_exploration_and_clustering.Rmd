@@ -25,6 +25,8 @@ countdata_rawcounts <- counts(dds)
 metadata <- as.data.frame(colData(dds))
 countdata <- counts(dds, normalized = TRUE) # counts normalized using DESeq2's method
 
+res_brca <- read.csv("./brca_data/other/res/res_brca_all.csv")
+
 # transpose for future use
 counts_transposed <- t(countdata)
 
@@ -118,7 +120,7 @@ metadata %>%
 ```
 
 ```{r}
-res_brca <- read.csv("./res_brca_all.csv")
+
 
 res_brca %>% 
   filter(padj < 0.05, log2FoldChange > 1.75) %>% 
@@ -152,11 +154,11 @@ sig_deg_2 <- res_brca %>%
 # DESeq2 Normalized Counts
 
 #this
-pca_result <- prcomp(t(countdata), center = TRUE, scale. = TRUE)
+#pca_result <- prcomp(t(countdata), center = TRUE, scale. = TRUE)
 
 pca_result <- prcomp(counts_z_transposed)
 
-pca_result <- prcomp(counts_z_transposed[,sig_deg_3k])
+#pca_result <- prcomp(counts_z_transposed[,sig_deg_3k])
 
 # Plot
 for_gg_plot <- as.data.frame(pca_result$x) %>% 
@@ -274,12 +276,11 @@ ggplot(df_for_plot, aes(x = Cluster, fill = Subtype)) +
 cancer_subtypes <- metadata$Category
 
 data <- counts_z_transposed
-data <- counts_z_transposed[,top_genes_0519]
-data <- counts_z_transposed[,rownames(row_variances_df_ordered)[1:15000]]
-data <- counts_z_transposed[,sig_deg]
-data <- counts_z_transposed[,deg_data_1.5]
-data <- counts_z_transposed[,sig_deg_2]
-data <- counts_z_transposed[,sig_deg_1.5]
+#data <- counts_z_transposed[,rownames(row_variances_df_ordered)[1:15000]]
+#data <- counts_z_transposed[,sig_deg]
+#data <- counts_z_transposed[,deg_data_1.5]
+#data <- counts_z_transposed[,sig_deg_2]
+#data <- counts_z_transposed[,sig_deg_1.5]
 
 
 #clusters_with_all <- clusters
@@ -319,6 +320,36 @@ ggplot(df_for_plot, aes(x = Cluster, fill = Subtype)) +
 ```
 
 Well wow, z-score really helps.
+
+### Hierarchical Clustering
+
+```{r hierarchical_clustering}
+
+# Perform hierarchical clustering
+hc <- hclust(dist(data) , method = "ward.D2")
+
+# Cut tree to form groups
+clusters <- cutree(hc, k = 10)
+
+# Compare with actual groups
+table(Cluster = clusters, ActualGroup = cancer_subtypes) 
+
+
+# Prepare data for visualization
+df_for_plot <- data.frame(Sample = rownames(data),
+                          Cluster = factor(clusters$cluster),
+                          ActualGroup = cancer_subtypes)
+
+# Visualize the clusters
+ggplot(df_for_plot, aes(x = ActualGroup, fill = Cluster)) +
+  geom_bar(position = "dodge") +
+  labs(title = "Comparison of K-means Clusters with Actual Groups",
+       x = "Actual Group",
+       y = "Count",
+       fill = "Cluster")
+
+
+```
 
 
 
