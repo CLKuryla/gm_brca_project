@@ -8,12 +8,12 @@ output: html_document
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 library(tidyverse)
+library(huge)
 ```
 
 One would imagine that the larger the sample size, the closer the estimated graph is to the "true" graph. Here we are going to test to see if a small sample is sufficient in our BRCA data. 
 
 ```{r eda}
-
 # We have the following distribution of samples
 metadata %>% 
   group_by(Category) %>% 
@@ -46,7 +46,7 @@ subsample_6 <- all_cases[(5*subsample_size+1):(6*subsample_size)] # comment out 
 # create data matrices 
 
 # set of genes to include
-gene_universe <- deg_data_1.25
+gene_universe <- sig_deg_2
 
 # data matrices for each subsample and for all together
 
@@ -58,9 +58,295 @@ data_subsample_3 <- as.matrix(counts_z_transposed[subsample_3,gene_universe])
 data_subsample_4 <- as.matrix(counts_z_transposed[subsample_4,gene_universe])
 data_subsample_5 <- as.matrix(counts_z_transposed[subsample_5,gene_universe])
 data_subsample_6 <- as.matrix(counts_z_transposed[subsample_6,gene_universe])
+```
 
+
+```{r all_samples}
 ug_glasso_all <- huge(x = data_all_samples, method = "glasso", nlambda = 10)
+```
+
+
+```{r subsample_1}
+# Let's start with subsample 1
 ug_glasso_subsample_1 <- huge(x = data_subsample_1, method = "glasso", nlambda = 10)
+huge_select_ebic_subsample_1 <- huge.select(ug_glasso_subsample_1, criterion = "ebic") #this is gamma = 0.5
+
+# Let's look at our lambda selection
+huge_select_ebic_subsample_1_.1 <- huge.select(ug_glasso_subsample_1, criterion = "ebic", ebic.gamma = 0.1)
+huge_select_ebic_subsample_1_.3 <- huge.select(ug_glasso_subsample_1, criterion = "ebic", ebic.gamma = 0.3)
+huge_select_ebic_subsample_1_.5 <- huge.select(ug_glasso_subsample_1, criterion = "ebic", ebic.gamma = 0.5)
+huge_select_ebic_subsample_1_.7 <- huge.select(ug_glasso_subsample_1, criterion = "ebic", ebic.gamma = 0.7)
+huge_select_ebic_subsample_1_.9 <- huge.select(ug_glasso_subsample_1, criterion = "ebic", ebic.gamma = 0.9)
+huge_select_ebic_subsample_1 <- huge.select(ug_glasso_subsample_1, criterion = "ebic", ebic.gamma = 0.3)
+
+huge_select_ebic_subsample_1_.1[["opt.lambda"]]
+huge_select_ebic_subsample_1_.3[["opt.lambda"]]
+huge_select_ebic_subsample_1[["opt.lambda"]]
+huge_select_ebic_subsample_1_.7[["opt.lambda"]]
+huge_select_ebic_subsample_1_.9[["opt.lambda"]]
+# all gave same result! 0.1668026
+huge_select_ebic_subsample_1[["opt.sparsity"]]
+# 0.02573249
+
+huge_select_ric_subsample_1_r2 <- huge.select(ug_glasso_subsample_1, criterion = "ric")
+# this result was non-sensical, it said optimal sparsity was 0
 
 ```
+
+```{r subsample_2}
+# Now for subsample 2
+ug_glasso_subsample_2 <- huge(x = data_subsample_2, method = "glasso", nlambda = 10)
+
+#huge_select_ebic_subsample_2 <- huge.select(ug_glasso_subsample_2, criterion = "ebic") #this is gamma = 0.5
+
+# Let's look at our lambda selection
+huge_select_ebic_subsample_2_.1 <- huge.select(ug_glasso_subsample_2, criterion = "ebic", ebic.gamma = 0.1)
+huge_select_ebic_subsample_2_.3 <- huge.select(ug_glasso_subsample_2, criterion = "ebic", ebic.gamma = 0.3)
+huge_select_ebic_subsample_2_.5 <- huge.select(ug_glasso_subsample_2, criterion = "ebic", ebic.gamma = 0.5)
+huge_select_ebic_subsample_2_.7 <- huge.select(ug_glasso_subsample_2, criterion = "ebic", ebic.gamma = 0.7)
+huge_select_ebic_subsample_2_.9 <- huge.select(ug_glasso_subsample_2, criterion = "ebic", ebic.gamma = 0.9)
+
+
+huge_select_ebic_subsample_2_.1[["opt.lambda"]]
+huge_select_ebic_subsample_2_.3[["opt.lambda"]]
+huge_select_ebic_subsample_2_.5[["opt.lambda"]]
+huge_select_ebic_subsample_2_.7[["opt.lambda"]]
+huge_select_ebic_subsample_2_.9[["opt.lambda"]]
+# all gave same result! 0.2154421
+huge_select_ebic_subsample_2_.5[["opt.sparsity"]]
+# 0.01881596
+
+huge_select_ric_subsample_2_r1 <- huge.select(ug_glasso_subsample_2, criterion = "ric")
+huge_select_ric_subsample_2_r2 <- huge.select(ug_glasso_subsample_2, criterion = "ric")
+# this result was non-sensical, it said optimal sparsity was 0
+
+```
+
+```{r compare_them}
+
+
+# all(huge_select_ebic_subsample_2_.5[["path"]][[7]] == huge_select_ebic_subsample_2_.5[["refit"]])
+# all(huge_select_ebic_subsample_2_.5[["icov"]][[7]] == huge_select_ebic_subsample_2_.5[["opt.icov"]])
+
+# adjacency matrices
+adjacency_matrix_sample_1 <- huge_select_ebic_subsample_1_.7[["refit"]]
+adjacency_matrix_sample_2 <- huge_select_ebic_subsample_2_.7[["refit"]]
+
+# precision matrices
+precision_matrix_sample_1 <- huge_select_ebic_subsample_1_.7[["opt.icov"]]
+precision_matrix_sample_2 <- huge_select_ebic_subsample_2_.7[["opt.icov"]]
+
+precision_matrix <- precision_matrix_sample_1
+k_zeros <- sum(precision_matrix == 0)
+missing_edges <- k_zeros/2
+missing_edges
+
+n <- dim(data_subsample_1)[2]
+max_edges <- n*(n-1)/2
+percent_edges_possible <- (max_edges - missing_edges)/max_edges
+percent_edges_possible
+huge_select_ebic_subsample_1_.7[["opt.sparsity"]]
+huge_select_ebic_subsample_1_.7[["opt.lambda"]]
+num_edges_method1 <- max_edges - missing_edges
+num_edges_method2 <- sum(adjacency_matrix_sample_1 == 1)/2
+
+max_edges - num_edges
+missing_edges
+missing_edges + num_edges
+
+
+adjacency_matrix <- abs(precision_matrix) > 0
+all(adjacency_matrix == t(adjacency_matrix))
+
+rownames(adjacency_matrix) <- colnames(ug_glasso_subsample_1$data)
+colnames(adjacency_matrix) <- colnames(ug_glasso_subsample_1$data)
+
+# compare
+
+adjacency_diff_1_v_2 <- adjacency_matrix_sample_1 - adjacency_matrix_sample_2
+adjacency_sum_1_v_2 <- adjacency_matrix_sample_1 + adjacency_matrix_sample_2
+
+precision_diff_1_v_2 <- precision_matrix_sample_1 - precision_matrix_sample_2
+
+# edges in 1 but not 2
+sum(adjacency_diff_1_v_2 == 1)/2
+
+# edges in 2 but not 1
+sum(adjacency_diff_1_v_2 == -1)/2
+
+# edges in both
+sum(adjacency_sum_1_v_2 == 2)/2
+
+# Check if adjacency_matrix_sample_1 is symmetric
+is_symmetric_1 <- identical(adjacency_matrix_sample_1, t(adjacency_matrix_sample_1))
+
+# Check if adjacency_matrix_sample_2 is symmetric
+is_symmetric_2 <- identical(adjacency_matrix_sample_2, t(adjacency_matrix_sample_2))
+
+# Print results
+is_symmetric_1
+is_symmetric_2
+
+edges_ug_1_df <- which(adjacency_matrix_sample_1 > 0, arr.ind = TRUE)
+length(edges_ug_1_df)
+2*num_edges
+
+```
+
+```{r}
+
+rownames(adjacency_matrix_sample_1) <- colnames(ug_glasso_subsample_1$data)
+colnames(adjacency_matrix_sample_1) <- colnames(ug_glasso_subsample_1$data)
+
+rownames(adjacency_matrix_sample_2) <- colnames(ug_glasso_subsample_2$data)
+colnames(adjacency_matrix_sample_2) <- colnames(ug_glasso_subsample_2$data)
+
+edges_graph_1 <- which(adjacency_matrix_sample_1 > 0, arr.ind = TRUE)
+edges_graph_1_names <- apply(edges_graph_1, 1, function(x) {
+  paste(rownames(adjacency_matrix_sample_1)[x[1]], colnames(adjacency_matrix_sample_1)[x[2]], sep = "--")
+})
+
+edges_graph_2 <- which(adjacency_matrix_sample_2 > 0, arr.ind = TRUE)
+edges_graph_2_names <- apply(edges_graph_2, 1, function(x) {
+  paste(rownames(adjacency_matrix_sample_2)[x[1]], colnames(adjacency_matrix_sample_2)[x[2]], sep = "--")
+})
+
+# Find edges unique to graph 1
+unique_edges_1 <- setdiff(edges_graph_1_names, edges_graph_2_names)
+length(unique_edges_1)
+
+# Find edges unique to graph 2
+unique_edges_2 <- setdiff(edges_graph_2_names, edges_graph_1_names)
+length(unique_edges_2)
+
+# Find edges common to both graphs
+common_edges <- intersect(edges_graph_1_names, edges_graph_2_names)
+length(common_edges)
+
+
+
+```
+
+
+```{r igraph}
+
+convert_to_igraph <- function(adj_matrix) {
+  graph_from_adjacency_matrix(adj_matrix, mode = "undirected", diag = FALSE)
+}
+
+g_subset1 <- convert_to_igraph(adjacency_matrix_sample_1)
+g_subset2 <- convert_to_igraph(adjacency_matrix_sample_2)
+# Continue for all subtypes
+
+plot_degree_distribution <- function(graph, main_title) {
+  degree_dist <- degree_distribution(graph)
+  plot(degree_dist, main = main_title, xlab = "Degree", ylab = "Frequency",
+       type = "b")
+}
+
+plot_degree_distribution(g_subset1, "Degree Distribution for Subtype 1")
+plot_degree_distribution(g_subset2, "Degree Distribution for Subtype 2")
+# Repeat for other subtypes
+
+get_common_unique_edges <- function(graph_list) {
+  edge_lists <- lapply(graph_list, E)
+  common_edges <- Reduce(intersect, edge_lists)
+  unique_edges <- Reduce(setdiff, edge_lists)
+  list(common = common_edges, unique = unique_edges)
+}
+
+edge_comparison <- get_common_unique_edges(list(g_subtype1, g_subtype2))
+# Add other subtypes to the list
+
+
+```
+
+
+
+
+Honestly, this isn't looking great? Lets' see what happens when we compare one of these to a cancer-free graph.
+
+
+```{r noncancerous_all}
+
+data_noncancerous_all <- as.matrix(counts_z_transposed[Noncancerous_cases,gene_universe])
+
+vars_with_zero_variance <- which(apply(data_noncancerous_all, 2, var) == 0)
+data_noncancerous_all[6,"OR4K8P"] <- -0.12
+
+ug_glasso_noncancerous_all <- huge(x = data_noncancerous_all, method = "glasso", nlambda = 10)
+huge_select_ebic_noncancerous_all <- huge.select(ug_glasso_noncancerous_all, criterion = "ebic") #this is gamma = 0.5
+
+# Let's look at our lambda selection
+huge_select_ebic_noncancerous_all_.1 <- huge.select(ug_glasso_noncancerous_all, criterion = "ebic", ebic.gamma = 0.1)
+huge_select_ebic_noncancerous_all_.3 <- huge.select(ug_glasso_noncancerous_all, criterion = "ebic", ebic.gamma = 0.3)
+huge_select_ebic_noncancerous_all_.5 <- huge.select(ug_glasso_noncancerous_all, criterion = "ebic", ebic.gamma = 0.5)
+huge_select_ebic_noncancerous_all_.7 <- huge.select(ug_glasso_noncancerous_all, criterion = "ebic", ebic.gamma = 0.7)
+huge_select_ebic_noncancerous_all_.9 <- huge.select(ug_glasso_noncancerous_all, criterion = "ebic", ebic.gamma = 0.9)
+huge_select_ebic_noncancerous_all <- huge.select(ug_glasso_noncancerous_all, criterion = "ebic", ebic.gamma = 0.3)
+
+huge_select_ebic_noncancerous_all_.1[["opt.lambda"]]
+huge_select_ebic_noncancerous_all_.3[["opt.lambda"]]
+huge_select_ebic_noncancerous_all[["opt.lambda"]]
+huge_select_ebic_noncancerous_all_.7[["opt.lambda"]]
+huge_select_ebic_noncancerous_all_.9[["opt.lambda"]]
+# all gave same result! 0.2154096
+huge_select_ebic_noncancerous_all[["opt.sparsity"]]
+# 0.01678589
+
+huge_select_ric_noncancerous_all_r2 <- huge.select(ug_glasso_noncancerous_all, criterion = "ric")
+# this result was non-sensical, it said optimal sparsity was 0
+
+
+adjacency_matrix_noncancerous_all <- huge_select_ebic_noncancerous_all_.3[["refit"]]
+precision_matrix_noncancerous_all <- huge_select_ebic_noncancerous_all_.3[["opt.icov"]]
+
+```
+
+```{r}
+
+rownames(adjacency_matrix_sample_1) <- colnames(ug_glasso_subsample_1$data)
+colnames(adjacency_matrix_sample_1) <- colnames(ug_glasso_subsample_1$data)
+
+rownames(adjacency_matrix_noncancerous_all) <- colnames(ug_glasso_noncancerous_all$data)
+colnames(adjacency_matrix_noncancerous_all) <- colnames(ug_glasso_noncancerous_all$data)
+
+```
+
+
+```{r}
+
+# subsample1 and noncancerous
+
+rownames(adjacency_matrix_sample_1) <- colnames(ug_glasso_subsample_1$data)
+colnames(adjacency_matrix_sample_1) <- colnames(ug_glasso_subsample_1$data)
+
+rownames(adjacency_matrix_noncancerous_all) <- colnames(ug_glasso_noncancerous_all$data)
+colnames(adjacency_matrix_noncancerous_all) <- colnames(ug_glasso_noncancerous_all$data)
+
+edges_graph_1 <- which(adjacency_matrix_sample_1 > 0, arr.ind = TRUE)
+edges_graph_1_names <- apply(edges_graph_1, 1, function(x) {
+  paste(rownames(adjacency_matrix_sample_1)[x[1]], colnames(adjacency_matrix_sample_1)[x[2]], sep = "--")
+})
+
+edges_noncancerous_all <- which(adjacency_matrix_noncancerous_all > 0, arr.ind = TRUE)
+edges_noncancerous_all_names <- apply(edges_noncancerous_all, 1, function(x) {
+  paste(rownames(adjacency_matrix_noncancerous_all)[x[1]], colnames(adjacency_matrix_noncancerous_all)[x[2]], sep = "--")
+})
+
+# Find edges unique to graph 1
+unique_edges_1 <- setdiff(edges_graph_1_names, edges_noncancerous_all_names)
+length(unique_edges_1)
+
+# Find edges unique to graph 2
+unique_edges_noncancerous <- setdiff(edges_noncancerous_all_names, edges_graph_1_names)
+length(unique_edges_noncancerous)
+
+# Find edges common to both graphs
+common_edges <- intersect(edges_graph_1_names, edges_noncancerous_all_names)
+length(common_edges)
+
+```
+
+
 
