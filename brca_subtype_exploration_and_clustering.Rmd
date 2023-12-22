@@ -1,0 +1,491 @@
+---
+title: "BRCA Subtype Analysis"
+author: "Christine Lucille Kuryla"
+date: "2023-12-20"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(DESeq2) # to extract and normalized the counts
+```
+
+See "tcga_rnaseq_brca.rmd" for details on how the count and subject data was filtered (samples) and normalized (counts).
+
+This data is RNA Seq (rows are genes, columns are samples) for breast cancer patients. There are four subtypes: Basal, Her2, LumA, and LumB, as well as non-cancerous tissues from patients' adjacent tissue.
+
+## Read in data
+
+```{r load_data}
+
+# load data and extract normalized counts
+dds <- readRDS("./brca_data/other/dds/dds_filtered_1221.RDS")
+countdata_rawcounts <- counts(dds)
+metadata <- as.data.frame(colData(dds))
+countdata <- counts(dds, normalized = TRUE) # counts normalized using DESeq2's method
+
+# transpose for future use
+counts_transposed <- t(countdata)
+
+# z-score scale
+counts_z_transposed <- apply(counts_transposed, 2, scale)
+rownames(counts_z_transposed) <- colnames(countdata)
+
+dim(counts_z_transposed)
+
+```
+
+
+## EDA
+
+### Summary statistics
+
+```{r summary_stats}
+
+# Number of samples in each category
+metadata %>% 
+  group_by(Category) %>% 
+  summarize(n=n())
+
+# Number of transcripts (rows) and total number of samples (columns)
+dim(countdata)
+
+metadata %>% 
+  group_by(Category) %>% 
+  summarize(count = n()) %>% 
+  ggplot(aes(x = Category, y = count)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = count, vjust = -0.3))
+
+metadata %>% 
+  ggplot(aes(x = age_at_diagnosis/365)) +
+  geom_histogram(bins = 20)
+
+metadata %>% 
+  ggplot(aes(x = age_at_index)) +
+  geom_histogram(bins = 20)
+
+metadata %>% 
+  group_by(cases.submitter_id) %>% 
+  summarize(count = n()) %>% 
+  filter(count != 2)
+
+metadata %>% 
+  group_by(ajcc_pathologic_stage) %>% 
+  filter(sample_type == "Primary Tumor") %>% 
+  summarize(count = n()) 
+
+metadata %>% 
+  group_by(ajcc_pathologic_stage) %>% 
+  filter(sample_type == "Primary Tumor") %>% 
+  summarize(count = n()) %>% 
+  ggplot(aes(x = ajcc_pathologic_stage, y = count)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = count, vjust = -0.3))
+
+metadata %>% 
+  group_by(ajcc_pathologic_n) %>% 
+  filter(sample_type == "Primary Tumor") %>% 
+  summarize(count = n()) 
+
+metadata %>% 
+  group_by(ajcc_pathologic_t) %>% 
+  filter(sample_type == "Primary Tumor") %>% 
+  summarize(count = n()) 
+
+metadata %>% 
+  group_by(ajcc_pathologic_m) %>% 
+  filter(sample_type == "Primary Tumor") %>% 
+  summarize(count = n()) 
+
+metadata %>% 
+  group_by(ajcc_pathologic_m) %>% 
+  filter(sample_type == "Primary Tumor") %>% 
+  summarize(count = n()) 
+
+metadata %>%
+  group_by(BRCA_Subtype_PAM50) %>%
+  filter(sample_type == "Primary Tumor") %>%
+  summarize(count = n())
+
+metadata %>%
+  group_by(`mRNA Clusters`) %>%
+  filter(sample_type == "Primary Tumor") %>%
+  summarize(count = n())
+
+
+```
+
+```{r}
+res_brca <- read.csv("./res_brca_all.csv")
+
+res_brca %>% 
+  filter(padj < 0.05, log2FoldChange > 1.75) %>% 
+  count()
+
+sig_deg <- res_brca %>% 
+  filter(padj < 0.05, abs(log2FoldChange) > 1.5) %>% #count()
+  pull(gene_symbol)
+
+sig_deg_1.25 <- res_brca %>% 
+  filter(padj < 0.05, abs(log2FoldChange) > 1.25)  %>% #count ()
+  filter(gene_symbol %in% colnames(counts_z_transposed)) %>% 
+  pull(gene_symbol)
+  
+sig_deg_1.5 <- res_brca %>% 
+  filter(padj < 0.05, abs(log2FoldChange) > 1.5) %>% #count ()
+  filter(gene_symbol %in% colnames(counts_z_transposed)) %>% 
+  pull(gene_symbol)
+
+sig_deg_2 <- res_brca %>% 
+  filter(padj < 0.05, abs(log2FoldChange) > 2) %>% #count ()
+  filter(gene_symbol %in% colnames(counts_z_transposed)) %>% 
+  pull(gene_symbol)
+```
+
+
+### PCA
+
+```{r eda_pca}
+
+# DESeq2 Normalized Counts
+
+#this
+pca_result <- prcomp(t(countdata), center = TRUE, scale. = TRUE)
+
+pca_result <- prcomp(counts_z_transposed)
+
+pca_result <- prcomp(counts_z_transposed[,sig_deg_3k])
+
+# Plot
+for_gg_plot <- as.data.frame(pca_result$x) %>% 
+  rownames_to_column(var = "cases") 
+for_gg_plot <- inner_join(metadata,# %>% 
+                         #   select(sample.submitter_id, 
+                         #          primary_diagnosis, vital_status, gender,
+                         #          sample_type
+                         #          ),
+                          for_gg_plot, 
+                          by = "cases") #%>% 
+  #filter(sample_type == "Primary Tumor")
+ggplot(for_gg_plot, 
+       aes(x = PC1, y = PC2, label = sample.submitter_id, 
+         #  color = sample_type)) +
+          color = Category)) +
+      #    color = BRCA_Subtype_PAM50)) +
+      #  color = BRCA_Pathology)) +
+        #  color = ajcc_pathologic_m)) +
+      #  #  color = treatments_radiation_treatment_type)) +
+    #  geom_text(aes(label=sample.submitter_id),hjust=1, vjust=0) +
+      geom_point() 
+
+# Play around with different PCs and coloring by different characteristics as needed
+
+ggplot(for_gg_plot, 
+      aes(x = PC1, y = PC2, label = sample.submitter_id, color = Category)) +
+      geom_point() 
+
+ggplot(for_gg_plot, 
+      aes(x = PC1, y = PC3, label = sample.submitter_id, color = Category)) +
+      geom_point() 
+
+ggplot(for_gg_plot, 
+      aes(x = PC3, y = PC2, label = sample.submitter_id, color = Category)) +
+      geom_point() 
+
+ggplot(for_gg_plot, 
+      aes(x = PC1, y = PC4, label = sample.submitter_id, color = Category)) +
+      geom_point() 
+
+ggplot(for_gg_plot, 
+      aes(x = PC2, y = PC4, label = sample.submitter_id, color = Category)) +
+      geom_point() 
+
+ggplot(for_gg_plot, 
+      aes(x = PC3, y = PC4, label = sample.submitter_id, color = Category)) +
+      geom_point() 
+
+
+```
+
+Seems legit.
+
+### K-means 
+
+Let's see if there are some natural clusters, and if z-scoring the already normalized counts will be beneficial. If so, we may consider using both the normalized and z-scored and normalized data in our analysis.
+
+```{r eda_kmeans}
+
+# counts_transposed <- t(countdata)
+# counts_z <- apply(countdata, 2, scale)
+# counts_z_transposed <- apply(counts_transposed, 2, scale)
+# 
+# #
+# data_n <- t(countdata)
+# cancer_subtypes <- metadata$Category
+# data_n <- data
+# #
+# 
+# #
+# data_transposed <- t(countdata)
+# data_z <- apply(data_transposed, 2, scale)
+# #
+
+
+
+data <- counts_transposed
+cancer_subtypes <- metadata$Category
+
+
+# Perform K-means clustering
+set.seed(1248) # for reproducibility
+clusters <- kmeans(data, centers = 5, nstart = 25)
+
+# Compare clusters with known cancer subtypes
+comparison_table <- table(Cluster = clusters$cluster, Subtype = cancer_subtypes)
+comparison_table
+
+# Perform a Chi-squared test to see if clusters are associated with cancer subtypes
+chisq.test(comparison_table)
+
+# Prepare data for visualization
+df_for_plot <- data.frame(Sample = 1:nrow(metadata),
+                          Cluster = factor(clusters$cluster),
+                          Subtype = cancer_subtypes)
+
+# Visualize the clusters and cancer subtypes
+ggplot(df_for_plot, aes(x = Subtype, fill = Cluster)) +
+  geom_bar(position = "dodge") +
+  labs(title = "K-means Clusters vs. Cancer Subtypes",
+       x = "Cancer Subtype",
+       y = "Count",
+       fill = "Cluster")
+
+ggplot(df_for_plot, aes(x = Cluster, fill = Subtype)) +
+  geom_bar(position = "dodge") +
+  labs(title = "Cancer Subtypes vs K-means Clusters",
+       fill = "Cancer Subtype",
+       y = "Count",
+       x = "Cluster")
+
+# Now do it for z-scaled normalized counts
+
+cancer_subtypes <- metadata$Category
+
+data <- counts_z_transposed
+data <- counts_z_transposed[,top_genes_0519]
+data <- counts_z_transposed[,rownames(row_variances_df_ordered)[1:15000]]
+data <- counts_z_transposed[,sig_deg]
+data <- counts_z_transposed[,deg_data_1.5]
+data <- counts_z_transposed[,sig_deg_2]
+data <- counts_z_transposed[,sig_deg_1.5]
+
+
+#clusters_with_all <- clusters
+#clusters <- clusters_with_all
+
+# Perform K-means clustering
+set.seed(1248) # for reproducibility
+clusters <- kmeans(data, centers = 5, nstart = 20)
+
+# Compare clusters with known cancer subtypes
+comparison_table <- table(Cluster = clusters$cluster, Subtype = cancer_subtypes)
+comparison_table
+
+# Perform a Chi-squared test to see if clusters are associated with cancer subtypes
+chisq.test(comparison_table)
+
+# Prepare data for visualization
+df_for_plot <- data.frame(Sample = 1:nrow(metadata),
+                          Cluster = factor(clusters$cluster),
+                          Subtype = cancer_subtypes)
+
+# Visualize the clusters and cancer subtypes
+ggplot(df_for_plot, aes(x = Subtype, fill = Cluster)) +
+  geom_bar(position = "dodge") +
+  labs(title = "K-means Clusters vs. Cancer Subtypes for Z-Scored Counts",
+       x = "Cancer Subtype",
+       y = "Count",
+       fill = "Cluster")
+
+ggplot(df_for_plot, aes(x = Cluster, fill = Subtype)) +
+  geom_bar(position = "dodge") +
+  labs(title = "Cancer Subtypes vs K-means Clusters for Z-Scored Counts",
+       fill = "Cancer Subtype",
+       y = "Count",
+       x = "Cluster")
+
+```
+
+Well wow, z-score really helps.
+
+
+
+## Non-graphical analysis
+
+### Extract pathologic vs normal for each subtype and all
+
+```{r data_for_each_subtype}
+
+categories_str <- c("NonCancerous", "Her2", "LumB", "LumA", "Basal")
+categories_factor <- relevel(as.factor(categories_str), ref = "NonCancerous")
+
+metadata <- metadata %>% 
+  mutate(category = as.factor(Category)) %>% 
+  mutate(category = relevel(category, ref = "NonCancerous"))
+
+# The variable of interest is "Category" and it contains
+table(metadata$Category)
+unique(metadata$Category)
+
+# Let's extract the sample names in each category
+Her2_cases <- metadata %>% 
+  filter(Category == "Her2") %>% 
+  pull(cases)
+
+Basal_cases <- metadata %>% 
+  filter(Category == "Basal") %>% 
+  pull(cases)
+
+LumA_cases <- metadata %>% 
+  filter(Category == "LumA") %>% 
+  pull(cases)
+
+LumB_cases <- metadata %>% 
+  filter(Category == "LumB") %>% 
+  pull(cases)
+
+Noncancerous_cases <- metadata %>% 
+  filter(Category == "NonCancerous") %>% 
+  pull(cases)
+
+All_cancerous_cases <- metadata %>% 
+  filter(Category != "NonCancerous") %>% 
+  pull(cases)
+
+# And the set combining the subtype with the noncancerous samples
+
+Her2_cases_and_controls <- c(Her2_cases, Noncancerous_cases)
+Basal_cases_and_controls <- c(Basal_cases, Noncancerous_cases)
+LumA_cases_and_controls <- c(LumA_cases, Noncancerous_cases)
+LumB_cases_and_controls <- c(LumB_cases, Noncancerous_cases)
+
+subtype_cases_fctn <- function(subtype) {
+  metadata %>% 
+  filter(Category == subtype) %>% 
+  pull(cases)
+}
+
+subtype_cases_and_controls_fctn <- function(subtype_cases) {
+  c(subtype_cases, Noncancerous_cases)
+}
+
+# subtype_cases = map_chr(subtype, subtype_cases_fctn, .id = "input")
+
+categories_str <- c("Her2", "LumB", "LumA", "Basal")
+Noncancerous_cases <- metadata %>% 
+  filter(Category == "NonCancerous") %>% 
+  pull(cases)
+
+# Access with
+
+# # access this with subtype_data$subtype_cases$LumA or
+        # # access this with subtype_data$subtype_cases[["LumA"]]
+# subtype_data$subtype_cases_and_control$Her2
+
+subtype_data <- tibble(subtype = categories_str,
+                       subtype_cases = map(subtype, subtype_cases_fctn) %>% 
+                          set_names(subtype),
+                       subtype_cases_and_control = map(subtype_cases, subtype_cases_and_controls_fctn)
+                         )
+
+
+```
+
+
+
+
+
+
+
+
+## Graphical Analysis
+
+### BNs
+
+```{r pcalg_cpdag_using_pc, eval=FALSE}
+
+# - If there is something interesting to say about which subtypes are “more similar to each other” you might ask whether the graphs from subtype A and B are more similar to each other compared to A vs C,D,E or other combinations. Can quantify the similarity between graphs with structural hamming distance.
+
+# As a first pass, we'll just take a look at some CPDAGs generated by the PC algorithm in the pcalg package, then look at their "similarity" using the structural hamming distance
+
+library(pcalg)
+
+# Ok even though it's z-score normalized, it's still super right skewed, at least by inspection, so I don't think it satisfies the normality assumption of gaussCItest, but I'm not sure how to use pcalg with an appropriate test
+# Some googling made me aware of dHSIC which is an independene test and a package in R, so maybe I can put it in the pcalg. For now I'm just goign to go with the standard though jsut for a sanity check\
+# I'm going to use the z-scored data because the independent test assumes normality and because it worked so well in the kmeans clustering
+
+# I'm going to format the data properly
+    # n = rows = observations = samples
+    # V = columns = variables = nodes = genes
+    # so I need to transpose the count matrix I usually use
+
+data_normal <- counts_transposed
+data_z <- counts_z_transposed
+
+library(pcalg)
+
+data_z_subset <- data_z[,top_genes]
+dim(data_z_subset)
+
+# Ok let's do it for Non-Cancerous first
+
+data <- data_z[Noncancerous_cases,]
+
+n <-  nrow(data)
+V <- colnames(data) # node names
+
+indepTest <- gaussCItest ## this might be a problem
+
+data <- data[, apply(data, 2, sd) != 0] # can't have sd = 0 for correlation matrix
+
+suffStat <- list(C = cor(data), n = n) ## using the correlation matrix
+
+pc.est <- pc(suffStat, indepTest, alpha = 0.05, labels = V, verbose=TRUE, skel.method = "stable.fast") ## estimate CPDAG
+if (require(Rgraphviz)) { plot(pc.est, main = "Estimated CPDAG")} ## show estimated CPDAG
+
+# show matrix
+summary(pc.est, amat = TRUE, zero.print = ".")
+
+# too big!
+
+```
+
+
+
+```{r}
+
+var(counts_z[9])
+
+row_variances <- apply(counts_z, 1, var)
+
+row_variances <- apply(countdata, 1, var)
+row_variances_df <- as.data.frame(row_variances)
+View(row_variances_df)
+
+row_variances_df_ordered <- row_variances_df %>% 
+  arrange(desc(row_variances))
+
+hist(row_variances_df$row_variances, n = 3)
+row_variances_df_ordered %>% 
+  ggplot(aes(x = row_variances)) +
+  geom_density()
+top_var_genes <- rownames(row_variances_df_ordered)[1:5000]
+
+
+
+
+
+```
+
