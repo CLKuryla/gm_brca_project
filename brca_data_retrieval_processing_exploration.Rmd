@@ -1,0 +1,1528 @@
+---
+title: "BRCA Data Retrieval, Processing, and Exploration"
+author: "Christine Lucille Kuryla"
+date: "2023-12-22"
+output: html_document
+---
+
+---
+title: "TCGA BRCA RNASeq"
+author: "Christine Lucille Kuryla"
+date: "2023-12-01"
+output: html_document
+---
+
+```{r setup, message = FALSE, echo = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(DESeq2)
+library(knitr)
+```
+
+# Load/Retrieve Data, Clean, Merge, Remove outliers
+
+First, we will load the necessary data and libraries for the analysis. The code to downlaod the data and generate the  files is included in this markdown, but not set to run every time it knits. 
+
+* `dds` is a DESEq2 dataset and contains the read count file as well as the metadata. They can be acceed by `counts(dds)` and `as.data.frame(colData(dds))`. 
+  * `countdata` has rows as ENSEMBL gene IDs and columns as samples
+  * `metadata` has rows as samples and columns as characteristics such as disease status (`sample_type`) and 99 other variables such as gender, etc. 
+* `res` is the matrix with the log2FoldChange and p-value for the differential gene expression between the two groups. It can also be calculated from `dds` using `res()` and `shrinkLFC()`. It has been appended to include the gene symbols as well as the ensg gene ids.
+
+```{r load_data_from_file, eval = TRUE, message = FALSE}
+
+# Load processed data to save time
+
+# Choice 1 --- 112 tumor samples with matched adjacent non-cancerous tissue from the same subjects
+# dds <- read_rds("./dds_brca.RDS") # this containes 112 tumor samples and matched adjaent non-cancerous tissue samples
+# res <- read_csv("./res_brca.csv") # this containes 112 tumor samples and matched adjaent non-cancerous tissue samples
+
+# Choice 2 --- ~1k samples with different subtypes
+# dds <- 
+# res <- 
+
+metadata <- as.data.frame(colData(dds))
+countdata <- counts(dds)
+
+TCGA_project <- "TCGA-BRCA"
+
+```
+
+## Retrieve RNASeq metadata
+
+Alternatively, we can generate those files by querying for the appropriate data online, downloading it, filtering it as necessary, combining the data together, and running the DESeq analysis.
+
+```{r query_retrieve_filter_combine_analyze data, eval = FALSE}
+# Query the database for the dataset of interest
+# This is TGCA -- The Cancer Genome Atlas
+
+library(TCGAbiolinks)
+
+# Specify project of interest. e.g., BRCA for breast cancer, BLCA for bladder cancer, etc
+# see ?TCGAbiolinks or ?GDCquery for more
+
+TCGA_project <- "TCGA-BRCA"
+
+# Create query for data request
+query <- GDCquery(project = TCGA_project,
+                  data.category = "Transcriptome Profiling",
+                  data.type = "Gene Expression Quantification",
+                  workflow.type = "STAR - Counts",
+                  experimental.strategy = "RNA-Seq",
+                  sample.type = c("Primary Tumor", "Solid Tissue Normal")
+)
+all_data_metadata <- query[[1]][[1]]
+#all_data_metadata <- getResults(query) 
+
+# Check sample types
+all_data_metadata %>% 
+  group_by(sample_type) %>% 
+  count()
+```
+
+### Matched Samples
+```{r matched_samples_filter data, eval = FALSE}
+# There are way more cancerous samples than non-cancerous. For a fair comparison, we will just look at the cancerous and non-cancerous samples from the same patients.
+
+control_samples <- as_tibble(all_data_metadata) %>% 
+  filter(sample_type == "Solid Tissue Normal") %>% 
+  pull(cases.submitter_id)
+
+disease_samples <- as_tibble(all_data_metadata) %>% 
+  filter(sample_type == "Primary Tumor") %>% 
+  pull(cases.submitter_id)
+
+# Test to see if all of the non-cancerous samples have corresponding cancerous samples
+all(control_samples %in% disease_samples)
+# They aren't. Find the intersection.
+matched_samples <- intersect(disease_samples, control_samples)
+
+# What is in the query of files, and what are the metadata about it 
+metadata <- getResults(query) #getResults(query, cols = c("sample_type", "cases","file_name", "file_size", "data_category", "data_type", "experimental_strategy"))
+metadata_filtered <- metadata %>% 
+  filter(cases.submitter_id %in% matched_samples)
+```
+
+Now some filtering and data cleaning needs to occur. The following chunk is specific for BRCA (breast cancer). 
+
+This is for a sample set consisting of samples of tumors and adjacent, non-cancerous breast tissue from the same people.
+```{r brca_matched_specific_filtering, eval = FALSE}
+
+# check that all samples had the same workflow pipeline
+metadata_filtered %>% 
+  group_by(analysis_workflow_version) %>% 
+  count()
+
+# They didn't. Filter out the workflows that don't match.
+metadata_filtered <- metadata_filtered %>% 
+  filter(analysis_workflow_version == "5d8c131bbff59fb0c969217fc1d44e6d1503cd1f")
+
+# check that they all had the same workflow link
+metadata_filtered %>% 
+  group_by(analysis_workflow_link) %>% 
+  count()
+
+# check that there is only one cancerous and one one non-cancerous sample per subject
+# Note I know this is not true for BLCA, because of of the sample id's was degenerate
+metadata_filtered %>% 
+  group_by(cases.submitter_id) %>% 
+  count()
+
+######################## SEE OTHER DOCUMENT FOR THE REST OF THIS CLEANING
+
+# TCGA-BL-A13J has extra samples. Remove two.
+metadata_filtered <- 
+  metadata_filtered %>% 
+  filter(id != "33506269-8eac-4273-8ea5-0d8a4d82d329") %>% 
+  filter(id != "4760b098-978b-4f2f-9bff-127d8edb48de")
+
+###############
+
+# Alternative way to do the above
+control_tissue <- metadata %>% 
+  filter(sample_type == "Solid Tissue Normal") %>% 
+  filter(analysis_workflow_version == "5d8c131bbff59fb0c969217fc1d44e6d1503cd1f")
+matched_disease_tissue <- metadata %>% 
+  filter(cases.submitter_id %in% pull(control_tissue, cases.submitter_id)) %>% 
+  filter(analysis_workflow_version == "5d8c131bbff59fb0c969217fc1d44e6d1503cd1f")
+
+#####################
+
+samples_filtered <- pull(metadata_filtered, cases)
+```
+
+In the next chunk, the specific files are queried for for the filtered samples. We retrieve the STAR files (with the count data) and the clinical and other metadata. The STAR files are then aggregated. 
+
+```{r download_specific_files_and_aggregate, eval = FALSE}
+# Now we want to only download the data for the subjects we will analyze
+# 
+# query_filtered <- GDCquery(project = TCGA_project,
+#                            data.category = "Transcriptome Profiling",
+#                            data.type = "Gene Expression Quantification",
+#                            workflow.type = "STAR - Counts",
+#                            experimental.strategy = "RNA-Seq",
+#                            barcode = samples_filtered,
+#                            sample.type = c("Primary Tumor", "Solid Tissue Normal")
+# )
+# View(query_filtered[[1]][[1]])
+#metadata_filtered <- query_filtered[[1]][[1]]
+
+
+query_all <- GDCquery(project = TCGA_project,
+                           data.category = "Transcriptome Profiling",
+                           data.type = "Gene Expression Quantification",
+                           workflow.type = "STAR - Counts",
+                           experimental.strategy = "RNA-Seq",
+                         #  barcode = samples_filtered,
+                           sample.type = c("Primary Tumor", "Solid Tissue Normal")
+)
+
+View(query_all[[1]][[1]])
+metadata_allsamples <- query_all[[1]][[1]]
+
+query_all
+
+# I didn't download all of the files at once
+
+# files_in_computer <- list.files("./GDCdata/TCGA-BRCA/Transcriptome_Profiling/Gene_Expression_Quantification/")
+# files_available <- all_data_metadata$file_id
+# all(files_in_computer %in% files_available)
+# files_in_computer_df <- tibble(file_id = files_in_computer)
+# not_downloaded_yet <- anti_join(all_data_metadata, files_in_computer_df, by = "file_id")
+# samples_not_downloaded <- pull(not_downloaded_yet, cases)
+# query_extra <- GDCquery(project = TCGA_project,
+#                            data.category = "Transcriptome Profiling",
+#                            data.type = "Gene Expression Quantification",
+#                            workflow.type = "STAR - Counts",
+#                            experimental.strategy = "RNA-Seq",
+#                            barcode = samples_not_downloaded,
+#                            sample.type = c("Primary Tumor", "Solid Tissue Normal")
+# )
+
+# Yay! Now we have our query. Let's download the data.
+
+# already did this, note that it takes a while
+#GDCdownload(query_extra)
+
+brcaClinicalData <- GDCprepare(query_all)
+
+# Now let's get a list of all of the samples so we can get one master count file that we can filter samples as necesary 
+
+
+
+# Awesome. Each sample has its own count star file nested in some folders, so now we need to extract them and make a master count file.
+
+i <- 1
+star_counts <- 
+  read.table(
+    str_c("./GDCdata/", TCGA_project, "/Transcriptome_Profiling/Gene_Expression_Quantification/", 
+          pull(metadata_allsamples, id)[i],
+          "/",
+          pull(metadata_allsamples, file_name)[i]),
+    skip = 6) %>% 
+  mutate(total_counts = V5 + V6 + V7 + V8 + V9) %>% 
+  mutate(raw_counts = V5 + V6) %>% 
+  dplyr::rename(ensg = V1,
+         gene_symbol = V2,
+         gene_type = V3,
+         counts1 = V4,
+         counts2 = V5,
+         counts3 = V6,
+         counts4 = V7, 
+         counts5 = V8,
+         counts6 = V9)
+
+
+# format a table to aggregate total counts into a table 
+star_counts <- 
+  read.table(
+    str_c("./GDCdata/", TCGA_project, "/Transcriptome_Profiling/Gene_Expression_Quantification/", 
+          pull(metadata_allsamples, id)[i],
+          "/",
+          pull(metadata_allsamples, file_name)[i]),
+    skip = 6) %>% 
+  mutate(total_counts = V5 + V6 + V7 + V8 + V9) %>% 
+  mutate(raw_counts = V5 + V6) %>% 
+  dplyr::rename(ensg = V1,
+         gene_symbol = V2,
+         gene_type = V3,
+         counts1 = V4,
+         counts2 = V5,
+         counts3 = V6,
+         counts4 = V7, 
+         counts5 = V8,
+         counts6 = V9)
+
+# define desired columns
+count_column <- "counts1"
+gene_id_column <- "ensg" # gene_symbol or ensg
+
+library(data.table)
+
+# Initialize df
+all_samples_count_data <- data.frame(NumericColumn = numeric(nrow(star_counts)))
+all_samples_count_data <- all_samples_count_data[-1]
+
+# loop to read and fill in count data into a df with rows as transcripts and columns as samples
+for(i in 1:nrow(metadata_allsamples)) {
+  star_counts <- 
+    read.table(
+      str_c("./GDCdata/", TCGA_project, "/Transcriptome_Profiling/Gene_Expression_Quantification/", 
+            pull(metadata_allsamples, id)[i],
+            "/",
+            pull(metadata_allsamples, file_name)[i]),
+      skip = 6) %>% 
+    mutate(total_counts = V5 + V6 + V7 + V8 + V9) %>% 
+    mutate(raw_counts = V5 + V6) %>% 
+    dplyr::rename(ensg = V1,
+           gene_symbol = V2,
+           gene_type = V3,
+           counts1 = V4,
+           counts2 = V5,
+           counts3 = V6,
+           counts4 = V7, 
+           counts5 = V8,
+           counts6 = V9)
+  
+  # sample_id <- pull(metadata_allsamples, sample.submitter_id)[i]
+  # 
+  # sample_counts <- star_counts %>% 
+  #   select(count_column,
+  #          ensg) %>% 
+  #   column_to_rownames("ensg") %>% 
+  #   rename(!!sample_id := count_column)
+  # 
+  # all_samples_count_data <- cbind(all_samples_count_data, sample_counts)
+  
+  sample_id <- pull(metadata_allsamples, sample.submitter_id)[i]
+  
+  sample_counts <- star_counts %>% 
+    select(count_column, ensg) %>% 
+    column_to_rownames("ensg") %>% 
+    setNames(sample_id)  # Rename the column using setNames
+  
+  all_samples_count_data <- cbind(all_samples_count_data, sample_counts)
+  
+  
+}
+
+
+# columns are "sample.submitter_id" from metadata
+symbol_all_samples_count_data <- cbind(gene_symbol = pull(star_counts,gene_symbol), all_samples_count_data)
+all_samples_raw_star_ensg <- all_samples_count_data
+
+# write_csv(symbol_all_samples_count_data, "./brca_data/complete_count_matrices/all_samples_symbol_raw_star.csv")
+# write_csv(all_samples_raw_star_ensg, "./brca_data/complete_count_matrices/all_samples_raw_star_ensg.csv")
+
+
+#################
+```
+
+## Summarized Experiment
+### For now, just counts with different normalizations
+
+```{r counts_different_normalizations, eval=FALSE}
+
+#brca_GDCprepare_summarized_exp <- brcaClinicalData
+
+# > query_all
+#        results   project           data.category                      data.type access experimental.strategy
+# 1 c("0d140.... TCGA-BRCA Transcriptome Profiling Gene Expression Quantification     NA               RNA-Seq
+#   platform  sample.type barcode workflow.type
+# 1       NA Primary ....      NA STAR - Counts
+# > brcaClinicalData <- GDCprepare(query_all)
+# |========================================================================================|100%                      Completed after 57 s 
+# Starting to add information to samples
+#  => Add clinical information to samples
+#  => Adding TCGA molecular information from marker papers
+#  => Information will have prefix 'paper_' 
+# brca subtype information from:doi.org/10.1016/j.ccell.2018.03.014
+# Available assays in SummarizedExperiment : 
+#   => unstranded
+#   => stranded_first
+#   => stranded_second
+#   => tpm_unstrand
+#   => fpkm_unstrand
+#   => fpkm_uq_unstrand
+
+library(SummarizedExperiment)
+
+query_all <- GDCquery(project = TCGA_project,
+                           data.category = "Transcriptome Profiling",
+                           data.type = "Gene Expression Quantification",
+                           workflow.type = "STAR - Counts",
+                           experimental.strategy = "RNA-Seq",
+                         #  barcode = samples_filtered,
+                           sample.type = c("Primary Tumor", "Solid Tissue Normal")
+)
+
+brca_GDCprepare_summarized_exp <- GDCprepare(query_all)
+
+#saveRDS(brca_GDCprepare_summarized_exp, "./brca_data/complete_count_matrices/brca_GDCprepare_summarized_exp.RDS")
+
+assayNames(brca_GDCprepare_summarized_exp)
+# [1] "unstranded"       "stranded_first"   "stranded_second"  "tpm_unstrand"     "fpkm_unstrand"   
+# [6] "fpkm_uq_unstrand"
+
+
+# Extract the assay data
+# Assuming `brca_GDCprepare_summarized_exp` is your SummarizedExperiment object
+
+# columns are metadata$cases (vs sample.submitter_id like in the raw star counts)
+counts_unstranded <- assays(brca_GDCprepare_summarized_exp)[["unstranded"]]
+counts_stranded_first <- assays(brca_GDCprepare_summarized_exp)[["stranded_first"]]
+counts_stranded_second <- assays(brca_GDCprepare_summarized_exp)[["stranded_second"]]
+counts_tpm_unstrand <- assays(brca_GDCprepare_summarized_exp)[["tpm_unstrand"]]
+counts_fpkm_unstrand <- assays(brca_GDCprepare_summarized_exp)[["fpkm_unstrand"]]
+counts_fpkm_uq_unstrand <- assays(brca_GDCprepare_summarized_exp)[["fpkm_uq_unstrand"]]
+
+counts_unstranded <- as.data.frame(counts_unstranded)
+counts_stranded_first <- as.data.frame(counts_stranded_first)
+counts_stranded_second <- as.data.frame(counts_stranded_second)
+counts_tpm_unstrand <- as.data.frame(counts_tpm_unstrand)
+counts_fpkm_unstrand <- as.data.frame(counts_fpkm_unstrand)
+counts_fpkm_uq_unstrand <- as.data.frame(counts_fpkm_uq_unstrand)
+
+write_csv(counts_unstranded, "./brca_data/complete_count_matrices/counts_unstranded.csv")
+write_csv(counts_stranded_first, "./brca_data/complete_count_matrices/counts_stranded_first.csv")
+write_csv(counts_stranded_second, "./brca_data/complete_count_matrices/counts_stranded_second.csv")
+write_csv(counts_tpm_unstrand, "./brca_data/complete_count_matrices/counts_tpm_unstrand.csv")
+write_csv(counts_fpkm_unstrand, "./brca_data/complete_count_matrices/counts_fpkm_unstrand.csv")
+write_csv(counts_fpkm_uq_unstrand, "./brca_data/complete_count_matrices/counts_fpkm_uq_unstrand.csv")
+
+# assay_data <- assays(se)[["assayName"]]  # Replace "assayName" with the actual name or index
+# Now assay_data contains the matrix of assay data which you can manipulate
+
+
+brca_GDCprepare_clinic <- GDCprepare_clinic(query_all)
+
+```
+
+## Retrieve clinical metadata
+
+```{r clinical_metadata, eval = FALSE}
+#################
+
+# Retrieve metadata and combine
+
+#metadata_clinical_test <- getResults(query_filtered)
+#merged <- merge(metadata, metadata_clinical_test, by = "id")
+
+# retrieve clinical metadata
+metadata_clinical <- GDCquery_clinic(
+  project = "TCGA-BRCA",
+  type = "clinical",
+  save.csv = FALSE
+  ) %>% 
+  mutate(cases.submitter_id = submitter_id)
+
+```
+
+## Clinical more ------ Return to this later
+
+```{r more_clinical}
+
+query_clinical <- GDCquery(
+  project = TCGA_project,
+  data.category = "Clinical"#,
+ # data.format = "bcr xml",
+#  barcode = c("TCGA-RU-A8FL","TCGA-AA-3972")
+)
+
+# Verify the availability of the files
+GDCquery(query_clinical)
+results <- getResults(query_clinical)
+View(results)
+
+#GDCdownload(query)
+clinical <- GDCprepare_clinic(query_clinical,"patient")
+clinical.drug <- GDCprepare_clinic(query_clinical,"drug")
+clinical.radiation <- GDCprepare_clinic(query_clinical,"radiation")
+clinical.admin <- GDCprepare_clinic(query_clinical,"admin")
+
+```
+
+
+## Retrieve subtype data
+
+```{r subtype_data}
+# what are these
+TCGA_MolecularSubtype()
+?TCGAbatch_Correction()
+
+# Get information about cancer subtypes
+
+source("http://www.bioconductor.org/biocLite.R")
+library(TCGAbiolinks)
+cancer <- "BRCA"
+PlatformCancer <- "IlluminaHiSeq_RNASeqV2"
+dataType <- "rsem.genes.results"
+pathCancer <- "TCGAData/miRNA"
+
+#datQuery <- TCGAquery(tumor = cancer, platform = PlatformCancer, level = "3")  
+datQuery <- TCGAquery(tumor = cancer, platform = PlatformCancer, level = "3")  
+lsSample <- TCGAquery_samplesfilter(query = datQuery)
+
+# get subtype information
+metadata_subtype <- TCGAquery_subtype(tumor = cancer)
+
+```
+
+## Combine the three RNASeq, original clinical, and subtype metadata
+
+```{r formatting_to_combine_metadata, eval = FALSE}
+# Adding new column to enable merge and saving out
+
+# countdata
+# colnames = "TCGA-E9-A1RH-01A-21R-A169-07"
+# this matches "cases" in metadata_allsamples
+# but metadata_clinical and metadata_subtype just have "TCGA-E9-A1NF"
+  ## metadata_clinical matches "submitter_id" and "bcr_patient_barcode
+  ## metadata_subtype matches "patient"
+  ## metadata_allsamples matches "cases.submitter_id"
+
+# metadata_allsamples
+# metadata_clinical
+# metadata_subtype
+
+metadata_allsamples <- metadata_allsamples %>%
+  mutate(id = cases.submitter_id)
+metadata_clinical <- metadata_clinical %>%
+  mutate(id = submitter_id)
+metadata_subtype <- metadata_subtype %>%
+  mutate(id = patient)
+
+# write_csv(metadata_allsamples, "./brca_data/metadata/metadata_rnaseq.csv")
+# write_csv(metadata_clinical, "./brca_data/metadata/metadata_clinical_0.csv")
+# write_csv(metadata_subtype, "./brca_data/metadata/metadata_subtype.csv")
+
+metadata_rnaseq <- metadata_allsamples
+
+all(metadata_subtype$patient %in% metadata_allsamples$cases.submitter_id) #mostly true not all
+all(metadata_clinical$patient %in% metadata_allsamples$cases.submitter_id) # TRUE
+
+```
+
+
+```{r filtering_from_before, eval = FALSE}
+############
+
+#countdata <- all_samples_count_data
+#metadata <- metadata_filtered %>% 
+#  column_to_rownames("sample.submitter_id") ########## uuh oh the double thing! 
+######## also make sure the order matches as per usual before
+
+countdata <- all_samples_count_data
+#metadata <- metadata_filtered
+#metadata <- metadata_combined
+metadata <- metadata_combined %>% 
+  mutate(sample = sample.submitter_id) %>% 
+#  column_to_rownames("sample") %>% 
+  filter(cases.submitter_id != "TCGA-E2-A1LS") %>% 
+  filter(cases.submitter_id != "TCGA-GI-A2C8") %>% 
+  filter(cases.submitter_id != "TCGA-A7-A0DC") %>%
+  filter(cases.submitter_id != "TCGA-A7-A13G") %>%
+  filter(cases.submitter_id != "TCGA-A7-A0DB") %>%
+  filter(cases.submitter_id != "TCGA-A7-A13E") 
+  
+good <- pull(metadata, sample.submitter_id)
+countdata <- countdata[,good]
+```
+
+## Filtering and outlier identification
+
+### Clean metadata for rnaseq
+
+```{r clean_rna_seq_metadata}
+
+metadata_rnaseq_subtype_clinical <- as.data.frame(metadata_subtype_and_clinical)
+
+metadata_rnaseq <- as.data.frame(metadata_rnaseq)
+metadata_subtype_and_clinical <- as.data.frame(metadata_subtype_and_clinical)
+
+
+# Make sure they all have the same workflow, etc
+
+# check that all samples had the same workflow pipeline
+metadata_rnaseq %>% 
+  group_by(analysis_workflow_version) %>% 
+  summarise(n=n())
+
+samples_wrong_workflow <- metadata_rnaseq %>% 
+  filter(analysis_workflow_version != "5d8c131bbff59fb0c969217fc1d44e6d1503cd1f") %>% 
+  pull(id)
+
+metadata_rnaseq %>% 
+  group_by(analysis_workflow_link) %>% 
+  summarise(n=n())
+
+samples_wrong_workflow_link <- metadata_rnaseq %>% 
+  filter(analysis_workflow_link == "quay.io/ncigdc") %>% 
+  pull(id)
+
+samples_wrong_workflow == samples_wrong_workflow_link #TRUE
+samples_wrong_workflow_version == samples_wrong_workflow # TRUE
+
+samples_wrong_workflow_version <- metadata_rnaseq %>% 
+  filter(analysis_workflow_version != "5d8c131bbff59fb0c969217fc1d44e6d1503cd1f") %>% 
+  pull(id)
+
+### SAMPLES are in samples_wrong_workflow
+samples_wrong_workflow
+
+############
+
+metadata <- read_csv("brca_data/metadata/metadata_combined_3_20231219.csv") %>% 
+  mutate(cases_row_names = cases) %>% 
+  column_to_rownames(var = "cases_row_names")
+
+########################
+
+# remove samples with wrong workflow
+
+metadata <- metadata %>% 
+  filter(analysis_workflow_version == "5d8c131bbff59fb0c969217fc1d44e6d1503cd1f") 
+
+# Find the samples with matched control samples
+
+control_tissue <- metadata_rnaseq_matched %>% 
+  filter(sample_type == "Solid Tissue Normal") 
+matched_disease_tissue <- metadata_rnaseq_matched %>% 
+  filter(cases.submitter_id %in% pull(control_tissue, cases.submitter_id)) %>% 
+  pull(id)
+
+# A few have extra samples. Remove them.
+# metadata_rnaseq_unique <-
+#   metadata_rnaseq %>%
+
+metadata <- metadata %>% 
+  filter(cases.submitter_id.x != "TCGA-BH-A1ET") %>% # doesn't have a matched sample
+  filter(file_id != "c89590e8-8b74-4c05-a022-e21eab5cffdd") %>% # extra in TCGA-A7-A0DB
+  filter(file_id != "6efd37a6-1669-4cdd-95b6-60c688e1e236") %>% # extra in TCGA-A7-A0DB 
+  filter(file_id != "3e8cff80-ed17-479c-8327-ca8e71ee7482") %>% # extra in TCGA-A7-A0DC
+  filter(file_id != "0a511373-8fd3-433a-a5e1-877530d6a239") %>% # extra in TCGA-A7-A13E
+  filter(file_id != "06952c59-978d-4ef4-b716-c55dd6747699") %>% # extra in TCGA-A7-A13E
+  filter(file_id != "25352bc8-c94c-4542-a7da-d4423adf72cf") %>% # extra in TCGA-A7-A13D
+  filter(file_id != "bf6e2b60-d65b-4963-8e8e-49ab3f93c3e1") %>% # extra in TCGA-A7-A13D
+  filter(file_id != "d2b6c967-b505-4f52-a4f7-91b6e8acbd1f") %>% # extra in TCGA-A7-A13G 
+  filter(file_id != "a5c799bc-1332-4127-8fda-84da04084d25") %>% # extra in TCGA-A7-A26E
+  filter(file_id != "2b519fff-dd2a-458e-ac2b-573167aeb7f2") %>% # extra in TCGA-A7-A26E
+  filter(file_id != "23ac8b84-f000-45ea-ad35-a46323d3670a") %>% # extra in TCGA-A7-A26J
+  filter(file_id != "b1ad91fb-fb78-4896-83cd-dad028a1d297") # extra in TCGA-A7-A26J
+  
+# Remove the Bs and outliers
+
+metadata <- metadata %>% 
+  filter(sample.submitter_id != "TCGA-AO-A0JC-01A") %>% 
+  filter(sample.submitter_id != "TCGA-AC-A3OD-01A") %>% 
+  filter(sample.submitter_id != "TCGA-AC-A2QH-01A") %>% 
+  filter(sample.submitter_id != "TCGA-AC-A2QJ-01A") %>% 
+  filter(sample.submitter_id != "TCGA-A7-A26F-01A") %>% 
+  filter(sample.submitter_id != "TCGA-A7-A26E-01A") %>% 
+  filter(sample.submitter_id != "TCGA-GI-A2C8-11A") %>% 
+  mutate(last_case = substr(cases, 14, 16)) %>% 
+  filter(last_case != "01B") %>% 
+  filter(last_case != "11B") #%>% 
+  # filter(sample.submitter_id != "TCGA-A7-A26J-01A") %>% #tpm
+  # filter(sample.submitter_id != "TCGA-E9-A3Q9-01A") %>% 
+  # filter(sample.submitter_id != "TCGA-D8-A1JS-01A") %>% 
+  # filter(sample.submitter_id != "TCGA-D8-A1XV-01A") %>% 
+  # filter(sample.submitter_id != "TCGA-A7-A13D-01A") %>% 
+  # filter(sample.submitter_id != "TCGA-E9-A22G-01A") %>% 
+  # filter(sample.submitter_id != "TCGA-EW-A1J6-01A")
+
+# Remove the uncommon subtypes
+
+# Remove the uncommon genders
+
+# Remove the outliers determined from PCA on counts
+
+# Other
+metadata <- metadata %>% 
+  filter(cases.submitter_id.x != "TCGA-E2-A1LS") %>%
+  filter(cases.submitter_id.x != "TCGA-GI-A2C8") %>%
+  filter(cases.submitter_id.x != "TCGA-A7-A0DC") %>%
+  filter(cases.submitter_id.x != "TCGA-A7-A13G") %>%
+  filter(cases.submitter_id.x != "TCGA-A7-A0DB") %>%
+  filter(cases.submitter_id.x != "TCGA-A7-A13E")
+
+# Create a variable for category
+metadata <- metadata %>% 
+  mutate(Category = ifelse(sample_type == "Solid Tissue Normal", 
+                   "NonCancerous", 
+                   BRCA_Subtype_PAM50))
+
+#write_csv(metadata, "./brca_data/metadata/metadata_combined_3_202312200954.csv")
+
+# RECAP
+# metadata_rnaseq_unique has the duplicates removed --- start from that
+# samples_wrong_workflow has the samples with the wrong workflow --- remove them
+#metadata_rnaseq_clean <- metadata_rnaseq_unique %>% 
+#  filter(id != samples_wrong_workflow)
+#write_csv(metadata_rnaseq_clean, "./brca_data/metadata/metadata_rnaseq_clean_0.csv")
+
+
+# OK now let's make some lists of samples to save out
+
+# All samples
+# All samples with outliers removed
+# All samples with control non-cancerous tissue removed
+# All samples with the matched to control non-cancerous 
+
+```
+
+
+```{r filter_bad_samples}
+
+metadata_combined_3 %>% 
+  mutate(last_case = substr(cases, 14, 16)) %>% 
+  group_by(last_case) %>% 
+  summarize(n = n()) 
+
+metadata_filtered_b <- metadata %>% 
+  mutate(last_case = substr(cases, 14, 16)) %>% 
+  filter(last_case != "01B") %>% 
+  filter(last_case != "11B")
+
+metadata_filtered_b_outliers <- metadata_filtered_b %>% 
+  filter(sample.submitter_id != "TCGA-AO-A0JC-01A") %>% 
+  filter(sample.submitter_id != "TCGA-AC-A3OD-01A") %>% 
+  filter(sample.submitter_id != "TCGA-AC-A2QH-01A") %>% 
+  filter(sample.submitter_id != "TCGA-AC-A2QJ-01A") %>% 
+  filter(sample.submitter_id != "TCGA-A7-A26F-01A") %>% 
+  filter(sample.submitter_id != "TCGA-A7-A26E-01A") %>% 
+  filter(sample.submitter_id != "TCGA-GI-A2C8-11A") #%>% 
+  # filter(sample.submitter_id != "TCGA-A7-A26J-01A") %>% #tpm
+  # filter(sample.submitter_id != "TCGA-E9-A3Q9-01A") %>% 
+  # filter(sample.submitter_id != "TCGA-D8-A1JS-01A") %>% 
+  # filter(sample.submitter_id != "TCGA-D8-A1XV-01A") %>% 
+  # filter(sample.submitter_id != "TCGA-A7-A13D-01A") %>% 
+  # filter(sample.submitter_id != "TCGA-E9-A22G-01A") %>% 
+  # filter(sample.submitter_id != "TCGA-EW-A1J6-01A")
+
+
+
+metadata <- metadata_only_cancerous_cases %>% 
+  filter(sample.submitter_id != "TCGA-AO-A0JC-01A") %>% 
+  filter(sample.submitter_id != "TCGA-AC-A3OD-01A") %>% 
+  filter(sample.submitter_id != "TCGA-AC-A2QH-01A") %>% 
+  filter(sample.submitter_id != "TCGA-AC-A2QJ-01A") %>% 
+  filter(sample.submitter_id != "TCGA-A7-A26F-01A") %>% 
+  filter(sample.submitter_id != "TCGA-A7-A26E-01A") %>% 
+  filter(sample.submitter_id != "TCGA-GI-A2C8-11A") %>% 
+  filter(sample.submitter_id != "TCGA-A7-A26J-01A") %>% 
+  mutate(last_case = substr(cases, 14, 16)) %>% 
+  filter(last_case != "01B") %>% 
+  filter(last_case != "11B")
+
+
+
+```
+
+
+# Remove problematic samples
+
+```{r}
+
+
+
+```
+
+
+## Combine metadata
+```{r combine_metadata, eval = FALSE}
+
+# metadata_rnaseq_clean
+# metadata_clinical
+# metadata_subtype
+
+# append metadata_subtype with metadata_clinical
+
+all(metadata_clinical$id %in% metadata_subtype$id) # mostly true
+all(metadata_subtype$id %in% metadata_clinical$id) # mostly true
+
+metadata_subtype_and_clinical <- inner_join(metadata_subtype, 
+                                metadata_clinical, 
+                                by = "id")
+
+# append metadata_allsamples with metadata_subtype
+metadata_combined_3 <- left_join(metadata_rnaseq_clean, 
+                                metadata_subtype_and_clinical, 
+                                by = "id")
+
+#write_csv(metadata_combined_3, "./brca_data/metadata/metadata_combined_3_20231219.csv")
+#write_csv(metadata_subtype_and_clinical, "./brca_data/metadata/metadata_subtype_and_clinical_20231219.csv")
+
+```
+
+
+
+### EDA Subtype
+
+```{r eda_subtype, eval = FALSE}
+
+data_subt_var_of_interest <- subtype_data %>% 
+  select(BRCA_Subtype_PAM50, BRCA_Pathology, vital_status, pathologic_stage, 
+         `CNV Clusters`:`Pan-Gyn Clusters`)
+
+names(data_subt_var_of_interest)[1:4]
+
+
+
+######
+
+# Load necessary packages
+library(ggplot2)
+library(gridExtra)  # or patchwork
+
+# Create a list to store the plots
+plots <- list()
+
+# Assuming your dataframe is df
+for (var1 in names(data_subt_var_of_interest)) {
+  for (var2 in names(data_subt_var_of_interest[1:4])) {
+  #  if (var1 != var2) {  # To avoid plotting the same variable against itself
+      # Check if both variables are categorical
+   #   if (is.factor(data_subt_var_of_interest[[var1]]) && is.factor(data_subt_var_of_interest[[var2]])) {
+        # Create the stacked bar chart
+        plot <- ggplot(data_subt_var_of_interest, aes_string(x = var1, fill = var2)) +
+          geom_bar(position = "stack") +
+          theme_minimal() +
+          ggtitle(paste("Stacked Bar of", var1, "vs", var2))
+        
+        # Add the plot to the list
+        plots[[length(plots) + 1]] <- plot
+      #}
+    #}
+  }
+}
+
+# Define the number of columns in the grid (you can adjust this)
+num_cols <- 4
+
+# Arrange the plots in a grid
+grid.arrange(grobs = plots, ncol = num_cols)
+
+# Alternatively, using patchwork
+library(patchwork)
+Reduce(`/`, plots) + plot_layout(ncol = num_cols)
+
+
+#####
+
+subtype_data %>% 
+  ggplot(aes(x = BRCA_Pathology, fill = BRCA_Subtype_PAM50)) +
+  geom_bar()
+
+subtype_data %>% 
+  ggplot(aes(x = `mRNA Clusters`, fill = BRCA_Pathology)) +
+  geom_bar()
+
+subtype_data %>% 
+  ggplot(aes(x = BRCA_Subtype_PAM50, fill = BRCA_Pathology)) +
+  geom_bar()
+
+subtype_data %>% 
+  group_by(BRCA_Subtype_PAM50, BRCA_Pathology) %>% 
+  count()
+
+subtype_data %>% 
+  group_by(BRCA_Subtype_PAM50) %>% 
+  dplyr::count()
+
+subtype_data %>% 
+  group_by(BRCA_Pathology) %>% 
+  dplyr::count()
+
+subtype_data %>% 
+  group_by(vital_status) %>% 
+  dplyr::count()
+
+subtype_data %>% 
+  group_by(pathologic_stage) %>% 
+  dplyr::count()
+
+subtype_data %>% 
+  group_by(BRCA_Pathology) %>% 
+  dplyr::count()
+
+subtype_data %>% 
+  group_by(BRCA_Subtype_PAM50) %>% 
+  dplyr::count()
+
+subtype_data %>% 
+  group_by(`CNV Clusters`) %>% 
+  count()
+
+subtype_data %>% 
+  group_by(`Mutation Clusters`) %>% 
+  count()
+
+subtype_data %>% 
+  group_by(`DNA.Methylation Clusters`) %>% 
+  count()
+
+subtype_data %>% 
+  group_by(`mRNA Clusters`) %>% 
+  count()
+
+subtype_data %>% 
+  group_by(`miRNA Clusters`) %>% 
+  count()
+
+subtype_data %>% 
+  group_by(`lncRNA Clusters`) %>% 
+  count()
+
+subtype_data %>% 
+  group_by(`Protein Clusters`) %>% 
+  count()
+
+subtype_data %>% 
+  group_by(`PARADIGM Clusters`) %>% 
+  count()
+
+subtype_data %>% 
+  group_by(`Pan-Gyn Clusters`) %>% 
+  count()
+
+
+# lumA <- subtype_data[which(subtype_data$PAM50.mRNA == "Luminal A"),1]
+# allSamples <- lsSample$IlluminaHiSeq_RNASeqV2 #1218 total samples
+# lumASamples <- allSamples[grep(x = allSamples, pattern = paste(lumA, collapse = "|"))] # 263 luminal samples found
+
+subtype_data %>% 
+  group_by(BRCA_Subtype_PAM50) %>% 
+  filter(patient %in% metadata$cases.submitter_id) %>% 
+  summarize(count = n()) 
+
+subtype_data %>% 
+  group_by(BRCA_Subtype_PAM50) %>% 
+ # filter(patient %in% metadata$cases.submitter_id) %>% 
+  summarize(count = n()) 
+
+```
+
+
+
+## Summary Statistics
+
+
+```{r}
+metadata <- metadata_combined_3
+
+metadata %>% 
+  group_by(ajcc_pathologic_stage) %>% 
+  filter(sample_type == "Primary Tumor") %>% 
+  dplyr::count()
+
+metadata %>% 
+  group_by(ajcc_pathologic_n) %>% 
+  filter(sample_type == "Primary Tumor") %>% 
+  dplyr::count()
+
+metadata %>% 
+  group_by(ajcc_pathologic_t) %>% 
+  filter(sample_type == "Primary Tumor") %>% 
+  dplyr::count()
+
+metadata %>% 
+  group_by(ajcc_pathologic_m) %>% 
+  filter(sample_type == "Primary Tumor") %>% 
+  dplyr::count()
+
+
+metadata %>% 
+  group_by(sample_type) %>% 
+  dplyr::count()
+
+```
+
+
+# Line up metadata with countdata
+
+```{r line_up_meta_and_count_data}
+
+# Load your desired count data and metadata
+countdata <- counts_unstranded
+metadata <- metadata_combined_3 %>% 
+  mutate(Category = ifelse(sample_type == "Solid Tissue Normal", 
+                   "NonCancerous", 
+                   BRCA_Subtype_PAM50))
+
+# Note: the column names of the countdata are aligned with "cases" from metadata_rnaseq
+# truncating them to id's will result in non-unique column names because of the samples where there are matched samples from adjacent tissue
+# to move forward, you just need to decide whether you want to take the cancerous tissues from those samples or the non-cancerous tissues from those samples
+
+
+## Determine cases
+matched_control_cases <- metadata %>% 
+  filter(sample_type == "Solid Tissue Normal") %>% 
+  pull(cases)
+
+matched_ids <- metadata %>% 
+  filter(sample_type == "Solid Tissue Normal") %>% 
+  pull(id)
+
+matched_cancerous_cases <- metadata %>% 
+  filter(sample_type == "Primary Tumor") %>% 
+  filter(id %in% matched_ids) %>% 
+  pull(cases)
+
+
+## Metadatas filtered (choose one)
+
+metadata_only_cancerous_cases <- metadata %>% 
+#  filter(sample_type == "Primary Tumor") %>% 
+  filter(!(cases %in% matched_control_cases)) %>% 
+  mutate(row_names = cases) %>% 
+  column_to_rownames(var = "row_names")
+
+metadata_with_noncancerous <- metadata %>% 
+  filter(!(cases %in% matched_cancerous_cases)) %>% 
+  mutate(row_names = cases) %>% 
+  column_to_rownames(var = "row_names")
+
+# CHOOSE IT HERE
+
+metadata <- metadata_with_noncancerous
+
+# extract cases in order of rownames 
+cases_ids <- as.data.frame(rownames(metadata)) 
+cases_ids <- cases_ids %>% 
+  mutate(cases_ids = `rownames(metadata)`) %>% 
+  select(cases_ids)
+
+colnames_count <- as.data.frame(colnames(counts_unstranded)) 
+count_ids <- colnames_count %>% 
+  mutate(count_ids = `colnames(counts_unstranded)`) %>% 
+  select(count_ids)
+
+all(cases_ids$cases_ids %in% count_ids$count_ids) # This needs to be true!
+cases_ids_vector <- cases_ids$cases_ids
+
+# col_count_truncated <- colnames_count %>% 
+#   mutate(id = substr(colnames(counts_unstranded), 1, 12))
+
+# Now select only the count data from the cases we want
+
+countdata <- countdata[,cases_ids_vector]
+metadata <- metadata
+
+# double check
+all(rownames(metadata) == colnames(countdata))
+
+# OK GREAT LET"S GO!!!
+
+metadata <- metadata_filtered_b_outliers
+countdata <- countdata[,rownames(metadata)]
+all(rownames(metadata) == colnames(countdata))
+
+```
+
+
+DESeq2
+
+```{r dds_creation, eval = FALSE}
+###############################
+library(DESeq2)
+
+# countdata <- countdata
+# metadata <- metadata
+
+metadata <- read_csv("./brca_data/metadata/metadata_combined_3_202312200954.csv") %>% 
+  mutate(cases_row_names = cases) %>% 
+  column_to_rownames(var = "cases_row_names")
+sum_exp <- readRDS("brca_data/complete_count_matrices/brca_GDCprepare_summarized_exp.RDS")
+counts_unstranded <- assays(sum_exp)[["unstranded"]]
+counts_unstranded <- as.data.frame(counts_unstranded)
+
+# DESeq2 takes RAW COUNTS
+metadata <- metadata
+countdata_raw <- counts_unstranded[,rownames(metadata)]
+
+dds <- DESeqDataSetFromMatrix(countData = countdata_raw,
+                              colData = metadata,
+                              design= ~ sample_type)
+
+# Visualize the effect of the filtering
+# Before filtering
+hist(log1p(counts(dds)), main = "Before filtering", xlab = "log(counts + 1)", breaks = 50)
+
+# After filtering 
+#  keep <- rowSums(counts(dds)) >= 10
+#keep <- rowSums(assay(dds) >= 5) >= 9
+keep <- rowSums(assay(dds) >= 10) >= 20
+dds_filtered <- dds[keep,]
+hist(log1p(counts(dds_filtered)), main = "After filtering", xlab = "log(counts + 1)", breaks = 50)
+
+dds <- dds_filtered
+
+# relevel (not necessary for the unsupervised analysis but good for future object DE analysis)
+# make sure reference is set to the reference level for interpretablity 
+relevel(dds$group, ref = "Solid Tissue Normal") 
+
+# Estimate size factors, accounts for library depth and composition (1 and 3)
+# This estimates the size factors and inserts them into the dds object so we can use to normalize
+dds <- estimateSizeFactors(dds)
+sizeFactors(dds)
+
+dds <- DESeq(dds)
+resultsNames(dds) # lists the coefficients
+res1 <- results(dds)
+# or to shrink log fold changes association with condition:
+res <- lfcShrink(dds, coef="sample_type_Solid.Tissue.Normal_vs_Primary.Tumor", type="apeglm")
+res_matrix <- as.matrix(res)
+#########
+res_matrix <- as.data.frame(res) %>% 
+  rownames_to_column(var = "ensg")
+res <- inner_join(res_matrix, star_counts[,1:2], by = "ensg")
+
+#write_csv(res_anno, "res_brca.csv")
+#write_rds(dds, "dds_brca.RDS")
+#ensg_to_gene_key <- as.data.frame(star_counts[,1:2])
+#write_rds(ensg_to_gene_key, "ensg_to_gene_key.RDS")
+
+
+saveRDS(dds, "./brca_data/other/dds/dds_202312201000.RDS")
+
+norm_counts <- counts(dds, normalized = TRUE) 
+norm_counts_df <- as.data.frame(norm_counts)
+write.csv(norm_counts_df, "./brca_data/complete_count_matrices/counts_deseq2norm_202312201001.csv",
+          row.names = TRUE, col.names = TRUE)
+
+countdata <- read_csv("./brca_data/complete_count_matrices/counts_deseq2norm_202312201001.csv") %>% 
+  column_to_rownames(var = "...1")
+metadata <- read_csv("./brca_data/metadata/metadata_combined_3_202312200954.csv") %>% 
+  mutate(cases_row_names = cases) %>% 
+  column_to_rownames(var = "cases_row_names")
+all(colnames(countdata) == rownames(metadata))
+
+```
+
+
+### Load data from files
+```{r load_clean_data}
+
+countdata <- read_csv("./brca_data/complete_count_matrices/counts_deseq2norm_202312201001.csv") %>% 
+  column_to_rownames(var = "...1")
+metadata <- read_csv("./brca_data/metadata/metadata_combined_3_202312200954.csv") %>% 
+  mutate(cases_row_names = cases) %>% 
+  column_to_rownames(var = "cases_row_names")
+all(colnames(countdata) == rownames(metadata))
+
+
+
+
+
+# test remove "Normal" because idk what that means
+metadata_filtered <- metadata %>% 
+  filter(Category != "NA") %>% 
+  filter(Category != "Normal")
+countdata_filtered <- countdata[,rownames(metadata_filtered)]
+
+countdata <- countdata_filtered
+metadata <- metadata_filtered
+
+write.csv(metadata, "./brca_data/metadata/metadata_202312201001_5cat.csv",
+          row.names = TRUE, col.names = TRUE)
+write.csv(countdata, "./brca_data/complete_count_matrices/counts_deseq2norm_202312201001_5cat.csv",
+          row.names = TRUE, col.names = TRUE)
+
+```
+
+
+### Prinicpal Component Analysis
+
+Here we will visualize the data using PCA through two methods. Each dot represents a sample.
+
+```{r pca, eval = TRUE}
+
+
+
+# Method 1 - PCA through R
+
+# Extract normalized counts, then run PCA on them
+
+norm_counts <- counts(dds, normalized = TRUE) 
+#norm_ct_filtered <- as.data.frame(norm_counts) %>% 
+#  select(pull(metadata, sample.submitter_id))
+
+# Perform PCA (need to transpose the matrix so the components are linear combinations of genes)
+pca_result <- prcomp(t(norm_counts), center = TRUE, scale. = TRUE)
+
+play_pca_result <- prcomp(norm_counts, center = TRUE, scale. = TRUE)
+play_for_gg_plot <- as.data.frame(play_pca_result$x) %>% 
+  rownames_to_column(var = "gene") 
+ggplot(play_for_gg_plot, 
+       aes(x = PC1, y = PC2, label = "gene")) +
+      geom_text(aes(label = gene),hjust=1, vjust=0) +
+      geom_point() +
+      labs(title = paste0(TCGA_project, " Principal Component Analysis"))
+
+
+
+counts <- counts_tpm_unstrand[,rownames(metadata)]
+#pca_result <- prcomp(t(counts), center = TRUE, scale. = TRUE)
+pca_result <- prcomp(t(counts), center = TRUE)
+
+
+
+#this
+pca_result <- prcomp(t(countdata), center = TRUE, scale. = TRUE)
+# Plot
+for_gg_plot <- as.data.frame(pca_result$x) %>% 
+  rownames_to_column(var = "cases") 
+for_gg_plot <- inner_join(metadata,# %>% 
+                         #   select(sample.submitter_id, 
+                         #          primary_diagnosis, vital_status, gender,
+                         #          sample_type
+                         #          ),
+                          for_gg_plot, 
+                          by = "cases") #%>% 
+  #filter(sample_type == "Primary Tumor")
+ggplot(for_gg_plot, 
+       aes(x = PC4, y = PC1, label = sample.submitter_id, 
+         #  color = sample_type)) +
+        #  color = Category)) +
+      #    color = BRCA_Subtype_PAM50)) +
+      #  color = BRCA_Pathology)) +
+          color = ajcc_pathologic_m)) +
+      #  #  color = treatments_radiation_treatment_type)) +
+    #  geom_text(aes(label=sample.submitter_id),hjust=1, vjust=0) +
+      geom_point() 
+
+# Play around with different PCs and coloring by different characteristics as needed
+
+# Method 2 (VST and DESeq2)
+
+# Variance stablizing trasformation to facilitate PCA visualizatoin (from DESeq2)
+vsd <- vst(dds, blind=TRUE)
+
+# PCA
+plotPCA(vsd, intgroup="sample_type") +
+  labs(subtitle = "Colored by sample type") +
+  ggtitle(str_c("PCA of ", TCGA_project)) 
+
+plotPCA(vsd, intgroup="primary_diagnosis") +
+  ggtitle(TCGA_project)
+
+plotPCA(vsd, intgroup="BRCA_Subtype_PAM50") +
+  ggtitle(TCGA_project)
+
+plotPCA(vsd, intgroup="BRCA_Pathology") +
+  ggtitle(TCGA_project)
+
+#plotPCA(vsd, intgroup="group", pcsToUse = 2:3) 
+#plotPCA(vsd, intgroup="timepoint", pcsToUse = 2:3) 
+
+#all_ct_filtered <- all_samples_count_data %>% 
+#  select(pull(mt_filtered_again, sample.submitter_id))
+
+
+# ignore
+#pca_result <- prcomp(all_ct_filtered, center = TRUE, scale. = TRUE)
+#pca_result <- prcomp(all_samples_count_data, center = TRUE, scale. = TRUE)
+#pca_result <- prcomp(t(norm_counts), center = TRUE, scale. = TRUE)
+#pve <- pca_result$sdev^2 / sum(pca_result$sdev^2)
+##plot(pca_result$x[, 2:3], asp = 1)  # Plotting the first two principal components
+#biplot(pca_result)
+
+```
+
+
+```{r qc, eval = FALSE}
+############
+
+QC
+
+# Mean and variance of raw counts
+# Syntax for apply(): apply(data, rows/columns, function_to_apply)
+mean_counts <- apply(countdata, 1, mean)
+variance_counts <- apply(countdata, 1, var)
+# df with mean and variance for every gene
+df_mv <- data.frame(mean_counts, variance_counts)
+# plot
+ggplot(df_mv)+
+  geom_point(aes(x=mean_counts, y=variance_counts)) +
+  scale_x_log10() +
+  scale_y_log10() +
+  xlab("Mean counts per gene") +
+  ylab("Variance per gene") +
+  ggtitle("Mean vs Variance in Gene Counts")
+
+# DESeq2's dispersion estimate plot
+plotDispEsts(dds)
+```
+
+```{r unsupervised_heatmap_dendrogram, eval = FALSE}
+
+# Warning this takes a long time because it's using all of the transcripts! That's a big df!
+
+library(pheatmap)
+library(tidyverse)
+# Choose heatmap color palette from RColorBrewer
+library(RColorBrewer)
+# display.brewer.all to choose colors
+heat_colors <- brewer.pal(n = 4, name = "PuOr") # name = "YlOrRd") PuOr PiYG RdBu
+
+# all genes
+pheatmap(norm_counts,
+         # sig_norm_counts, 
+         #pheatmap(sig_norm_counts, 
+         color = heat_colors, 
+         #colorRampPalette(c("darkgreen","white","darkred"))(100),
+         cluster_rows = T, 
+         cluster_cols = T,
+         show_rownames = F,
+         show_colnames = F,
+         #annotation = dplyr::select(metadata, Date, Exposure), 
+         annotation = dplyr::select(metadata, sample_type), 
+         main = paste0("Unsupervised Heatmap: ", TCGA_project),
+         scale = "row")
+
+```
+
+
+```{r volcano_plot, eval = TRUE}
+#####
+
+# Volcano Plot
+# The volcano plot gives a global view and shows the range of FCs needed to find significance
+
+p_thresh = 0.05
+lfc_thresh = 1.25
+
+# Generate logical column to indicate DE of gene
+res_volc <- data.frame(res) %>% 
+  mutate(threshold_p = padj < p_thresh) %>%
+  mutate(threshold_lfc = abs(log2FoldChange) > lfc_thresh) %>%
+  mutate(threshold = threshold_p & threshold_lfc)
+
+# Add labels for legend
+res_volc <- data.frame(res_volc) %>% 
+  mutate(threshold = padj < 0.05 & abs(log2FoldChange) > lfc_thresh) %>%
+  mutate(volc_cat = if_else(padj < 0.05 & abs(log2FoldChange) > lfc_thresh, "DE",
+                            if_else(padj < 0.05, "Padj",
+                                    if_else(abs(log2FoldChange) > lfc_thresh, "LFC",
+                                            "Not DE", missing = "Not DE")))) %>%
+  mutate(volc_cat = factor(volc_cat)) 
+
+# Plot Volcano Plot (comment out or in different options as desired)
+
+ggplot(res_volc, aes(x = log2FoldChange, y = -log10(padj), color = volc_cat)) + #,
+  geom_point() + # threshold)) + , label = entrez
+  xlab("log2 Fold Change") + 
+  ylab("-log10 Adjusted p-value") + 
+  #  ggtitle(paste0("Volcano Plot for LFC > ", lfc_thresh, " and padj < ",p_thresh)) +
+  #  geom_text(label = res_volc$SYMBOL) +
+  geom_text(aes(label=ifelse(-log10(padj)>130 | abs(log2FoldChange) > 8, as.character(gene_symbol),'')),hjust=0,vjust=0) +
+  theme(legend.position = "none", 
+        plot.title = element_text(size = rel(1.5), hjust = 0.5), 
+        axis.title = element_text(size = rel(1.25))) +
+  #  theme(legend.position = "none") +
+  ggtitle(paste0("Volcano Plot: ", TCGA_project))
+
+################
+```
+
+
+```{r heatmap, eval = TRUE}
+# Sig DE Heatmap 
+
+library(pheatmap)
+library(tidyverse)
+# Choose heatmap color palette from RColorBrewer
+library(RColorBrewer)
+# display.brewer.all to choose colors
+heat_colors <- brewer.pal(n = 4, name = "PuOr") # name = "YlOrRd") PuOr PiYG RdBu
+
+# Expression heatmap
+
+# Subset normalized counts to significant genes ordered by padj for future use
+# this will be used to generate a heatmap
+
+res_sig <- res %>%
+    arrange(padj) %>%
+    subset(padj < p_thresh)
+
+res_de <- res %>%
+  arrange(padj) %>%
+  subset(padj < p_thresh) %>%
+  subset(log2FoldChange < lfc_thresh)
+
+# normalized_cts <- counts(dds, normalized = TRUE)
+sig_norm_counts <- norm_counts[pull(res_sig, ensg), ]
+sig_norm_counts_de <- norm_counts[pull(res_de, ensg), ]
+
+#normalized_cts_0 <- counts(dds, normalized = TRUE)
+# z_scored <- 
+#t(scale(t(vst)))
+
+# HEATMAP 
+
+pheatmap(sig_norm_counts_de,
+ # sig_norm_counts, 
+#pheatmap(sig_norm_counts, 
+         color = heat_colors, 
+#colorRampPalette(c("darkgreen","white","darkred"))(100),
+         cluster_rows = T, 
+        cluster_cols = T,
+         show_rownames = F,
+         show_colnames = F,
+#annotation = dplyr::select(metadata, Date, Exposure), 
+         annotation = dplyr::select(metadata, sample_type), 
+         main = paste0("Heatmap of Significantly DEG ", TCGA_project),
+         scale = "row")
+
+# end[rownames(res_de), ]
+
+#normalized_cts_0 <- counts(dds, normalized = TRUE)
+# z_scored <- 
+#t(scale(t(vst)))
+
+# HEATMAP 
+
+sncd1 <- sig_norm_counts_de[1:2000,]
+
+#pheatmap(sig_norm_counts_de,
+pheatmap(sncd1,
+         # sig_norm_counts, 
+         #pheatmap(sig_norm_counts, 
+         color = heat_colors, 
+         #colorRampPalette(c("darkgreen","white","darkred"))(100),
+         cluster_rows = T, 
+         cluster_cols = T,
+         show_rownames = F,
+         show_colnames = F,
+         #annotation = dplyr::select(metadata, Date, Exposure), 
+         annotation = dplyr::select(metadata, sample_type), 
+         main = paste0("Heatmap of Top 2000 Significantly DEG: ", TCGA_project),
+         scale = "row")
+
+# end
+
+```
+
+Here are the top differentially expressed genes.
+
+```{r deg_results}
+
+knitr::kable(res %>% 
+               arrange(padj) %>% 
+               mutate(log10padj = log10(padj)) %>% 
+               select(gene_symbol, log10padj, log2FoldChange, lfcSE, baseMean, pvalue, padj, ensg) %>%
+               head(n = 50))
+
+```
+
+```{r data_moving_forward}
+
+# creation of new dds for github
+
+library(tidyverse)
+countdata <- read_csv("./brca_data/complete_count_matrices/counts_deseq2norm_202312201001_5cat.csv") %>% 
+  column_to_rownames(var = "...1")
+metadata <- read_csv("./brca_data/metadata/metadata_202312201001_5cat.csv") %>% 
+  mutate(cases_row_names = cases) %>% 
+  column_to_rownames(var = "cases_row_names")
+all(colnames(countdata) == rownames(metadata))
+
+
+# DEG from all brca vs control
+res <- read_csv("./res_brca.csv")
+write_csv(res_1to1, "./res_brca_all.csv")
+
+res <- read_csv("./res_brca_all.csv")
+
+# genes in count data
+genes_with_counts <- rownames(countdata)
+length(genes_with_counts) # 31471
+
+# relevant res matrix 
+ensg_with_lfcp <- res$ensg
+length(genes_with_lfcp) # 29665
+res_genes_symbol <- res$gene_symbol
+length(res_genes_symbol) # 29665
+
+# Unique --- most of them
+res_genes_unique_symbol <- unique(res$gene_symbol)
+length(res_genes_unique_symbol) # 29591
+
+# Find duplicates
+duplicates <- duplicated(res_genes_symbol)
+# Display duplicates
+duplicated_genes <- res_genes_symbol[duplicates]
+duplicated_genes
+duplicated_genes <- unique(duplicated_genes)
+
+keep_this_ensg <- res %>% 
+  filter(gene_symbol %in% duplicated_genes) %>% 
+  arrange(desc(baseMean)) %>% 
+  head(n=6)
+
+keep_this_ensg <- c("ENSG00000261737.1", "ENSG00000248671.8", "ENSG00000261737.1")
+
+
+# Ok 
+
+res_1to1 <- res %>%
+  group_by(gene_symbol) %>%
+  slice(1) %>%  # This selects the first entry for each gene symbol
+  ungroup()
+
+# `dds` is a DESEq2 dataset and contains the read count file as well as the metadata. 
+# They can be acceed by `counts(dds)` and `as.data.frame(colData(dds))`. 
+
+# 
+dds_file <- readRDS("./brca_data/other/dds/dds_202312201000.RDS")
+countdata_dds <- counts(dds_file)
+
+# countdata <- read_csv("./brca_data/complete_count_matrices/counts_deseq2norm_202312201001_5cat.csv") %>% 
+#   column_to_rownames(var = "...1")
+
+countdata_new <- as.data.frame(countdata_dds) %>% 
+  rownames_to_column(var = "ensg") 
+
+countdata_new <- left_join(res, countdata_new, by = "ensg")
+
+countdata_new <- countdata_new %>% 
+  column_to_rownames(var = "gene_symbol") 
+
+countdata_new <- countdata_new %>%
+  select(-1:-6)
+
+subj_new <- metadata %>% pull(cases)
+
+countdata_new <- countdata_new[,subj_new]
+
+countdata_new <- countdata_new %>% 
+  na.omit()
+
+#genes_new <- rownames(countdata_new_final)
+
+
+
+
+
+#countdata_new_mat <- as.matrix(countdata_new)
+
+all(rownames(metadata) == colnames(countdata_new))
+
+
+dds <- DESeqDataSetFromMatrix(countData = countdata_new,
+                                  colData = metadata,
+                                  design= ~ sample_type)
+
+relevel(dds$sample_type, ref = "Solid Tissue Normal") 
+
+# Estimate size factors, accounts for library depth and composition (1 and 3)
+# This estimates the size factors and inserts them into the dds object so we can use to normalize
+dds <- estimateSizeFactors(dds)
+sizeFactors(dds)
+
+
+saveRDS(dds, "./brca_data/other/dds/dds_filtered_1221.RDS")
+
+
+```
+
